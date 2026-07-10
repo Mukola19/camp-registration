@@ -12,7 +12,6 @@
 //    «ID» — стабільний номер (1..5), НЕ змінюється. «Група» — назва (редагована).
 //  Назви, наставники, колір і вікові межі зберігаються ТУТ (в таблиці),
 //  тож їх можна редагувати/перейменовувати без зміни коду.
-//  Вікові межі також оновлює «Перерозподіл».
 // ═══════════════════════════════════════════════════════════════
 
 const SHEET_NAME   = 'Учасники';
@@ -39,7 +38,6 @@ function doGet(e) {
     else if (action === 'updateParticipant') result = updateParticipant(e.parameter);
     else if (action === 'deleteParticipant') result = deleteParticipant(e.parameter);
     else if (action === 'getGroups')         result = { groups: readGroups(getOrCreateGroupsSheet()) };
-    else if (action === 'reorganize')        result = reorganize();
     else result = { error: 'Невідома дія: ' + action };
   } catch (err) {
     result = { error: err.message };
@@ -184,131 +182,4 @@ function readGroups(gsh) {
     if (String(o['Група'] || '').trim()) out.push(o);
   }
   return out;
-}
-
-function writeGroupRanges(gsh, ids, ranges) {
-  const vals    = gsh.getDataRange().getValues();
-  const headers = vals[0].map(h => String(h).trim());
-  const cId  = headers.indexOf('ID');
-  const cMin = headers.indexOf('ВікВід');
-  const cMax = headers.indexOf('ВікДо');
-  for (let i = 1; i < vals.length; i++) {
-    const idx = ids.map(String).indexOf(String(vals[i][cId]));
-    if (idx === -1) continue;
-    const r = ranges[idx];
-    if (cMin !== -1) gsh.getRange(i + 1, cMin + 1).setValue(r.min == null ? '' : r.min);
-    if (cMax !== -1) gsh.getRange(i + 1, cMax + 1).setValue(r.max == null ? '' : r.max);
-  }
-}
-
-// ─── АЛГОРИТМ РІВНОМІРНОГО РОЗПОДІЛУ ─────────────────────────
-// Ділить дітей на G суміжних вікових груп максимально рівних за кількістю.
-// Діти одного віку НІКОЛИ не розриваються між групами.
-//
-// partitionCounts: розбиває масив кількостей (по одному на кожен унікальний
-// вік) на рівно G суміжних частин. Критерій (лексикографічно):
-//   1) мінімізувати НАЙБІЛЬШУ групу (щоб не було однієї роздутої);
-//   2) за рівності — мінімізувати суму квадратів розмірів (загальна рівність).
-// Динамічне програмування — оптимальний поділ.
-function partitionCounts(counts, G) {
-  const m = counts.length;
-  if (m === 0) return [];
-  if (m <= G) return counts.map((_, i) => i); // кожен вік — окрема група
-
-  const prefix = [0];
-  for (let i = 0; i < m; i++) prefix.push(prefix[i] + counts[i]);
-  const size = (a, b) => prefix[b] - prefix[a];   // сума на [a, b)
-
-  // краще: спершу менший максимум, потім менша сума квадратів
-  const better = (a, b) => (a.mx !== b.mx ? a.mx < b.mx : a.sq < b.sq);
-
-  // dp[k][i] = найкраща пара {mx, sq} для поділу перших i віків на k частин
-  const dp  = [];
-  const cut = [];
-  for (let k = 0; k <= G; k++) { dp.push(new Array(m + 1).fill(null)); cut.push(new Array(m + 1).fill(-1)); }
-  dp[0][0] = { mx: 0, sq: 0 };
-  for (let k = 1; k <= G; k++) {
-    for (let i = k; i <= m; i++) {
-      for (let j = k - 1; j < i; j++) {
-        if (!dp[k - 1][j]) continue;
-        const s = size(j, i);
-        const cand = { mx: Math.max(dp[k - 1][j].mx, s), sq: dp[k - 1][j].sq + s * s };
-        if (dp[k][i] === null || better(cand, dp[k][i])) { dp[k][i] = cand; cut[k][i] = j; }
-      }
-    }
-  }
-
-  const bucketOf = new Array(m);
-  let i = m;
-  for (let k = G; k >= 1; k--) {
-    const j = cut[k][i];
-    for (let a = j; a < i; a++) bucketOf[a] = k - 1;
-    i = j;
-  }
-  return bucketOf;
-}
-
-// ages — відсортований за зростанням масив віків. Повертає індекс групи (0..G-1)
-// для кожного елемента.
-function evenBuckets(ages, G) {
-  const n = ages.length;
-  const res = new Array(n).fill(0);
-  if (n === 0) return res;
-
-  const counts = [];
-  for (let i = 0; i < n; i++) {
-    if (i === 0 || ages[i] !== ages[i - 1]) counts.push(1);
-    else counts[counts.length - 1]++;
-  }
-
-  const bucketOf = partitionCounts(counts, G);
-
-  let di = -1;
-  for (let i = 0; i < n; i++) {
-    if (i === 0 || ages[i] !== ages[i - 1]) di++;
-    res[i] = bucketOf[di];
-  }
-  return res;
-}
-
-function reorganize() {
-  const gsh = getOrCreateGroupsSheet();
-  const grp = readGroups(gsh);
-  if (!grp.length) throw new Error('Немає груп в аркуші «' + GROUPS_SHEET + '»');
-  const groupIds   = grp.map(g => g['ID']);
-  const groupNames = grp.map(g => String(g['Група']).trim());
-  const G = grp.length;
-
-  // Дійсні учасники з валідним віком
-  const all   = getParticipants().participants;
-  const valid = all
-    .filter(p => {
-      const d   = p['Дійсний'];
-      const isV = d === true || d === '' || d == null || String(d).toLowerCase() === 'true';
-      const age = Number(p['Вік']);
-      return isV && !isNaN(age) && age > 0;
-    })
-    .map(p => ({ row: p.row, age: Number(p['Вік']) }))
-    .sort((a, b) => a.age - b.age);
-
-  const assign = evenBuckets(valid.map(v => v.age), G);
-
-  // Межі груп + оновлення групи (id + назви) кожного учасника
-  const ranges = grp.map(() => ({ min: null, max: null }));
-  const psh    = sheet();
-  ensureParticipantColumns(psh);
-  const grpCol = colIndex(psh, 'Група');
-  const gidCol = colIndex(psh, 'ГрупаID');
-
-  valid.forEach((v, i) => {
-    const gi = assign[i];
-    if (gidCol !== -1) psh.getRange(v.row, gidCol).setValue(groupIds[gi]);
-    if (grpCol !== -1) psh.getRange(v.row, grpCol).setValue(groupNames[gi]);
-    const r = ranges[gi];
-    if (r.min == null || v.age < r.min) r.min = v.age;
-    if (r.max == null || v.age > r.max) r.max = v.age;
-  });
-
-  writeGroupRanges(gsh, groupIds, ranges);
-  return { ok: true, count: valid.length, groups: readGroups(gsh) };
 }

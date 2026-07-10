@@ -795,7 +795,6 @@ function init() {
     buildGroupChips();
     if (selectedGroup) activateGroup(selectedGroup);
   });
-  loadParticipants();   // прогрів кешу учасників наперед
 }
 
 // Уся конфігурація груп (назва, наставники, колір, межі) — з бекенду (аркуш «Групи»).
@@ -837,26 +836,16 @@ async function appsScriptCall(action, payload = {}) {
   return data;
 }
 
-// Кеш учасників: одне завантаження ділиться між усіма викликами.
-// force=true — примусово перезавантажити (після змін / кнопкою 🔄).
-let participantsPromise = null;
-let participantsReady   = false;  // чи вже є завантажені дані
-function invalidateParticipants() { participantsPromise = null; participantsReady = false; }
-
-function loadParticipants(force = false) {
-  if (force) participantsPromise = null;
-  if (!participantsPromise) {
-    participantsPromise = appsScriptCall('getParticipants')
-      .then(data => {
-        participants = (data.participants || []).filter(p => {
-          const d = p['Дійсний'] ?? true;
-          return d === true || String(d).toLowerCase() === 'true';
-        });
-        participantsReady = true;
-      })
-      .catch(() => { participants = []; participantsReady = true; });
-  }
-  return participantsPromise;
+// Завантаження учасників — щоразу свіжі дані з бекенду (без кешу).
+function loadParticipants() {
+  return appsScriptCall('getParticipants')
+    .then(data => {
+      participants = (data.participants || []).filter(p => {
+        const d = p['Дійсний'] ?? true;
+        return d === true || String(d).toLowerCase() === 'true';
+      });
+    })
+    .catch(() => { participants = []; });
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────
@@ -1023,8 +1012,7 @@ async function registerParticipant() {
   if (APPS_SCRIPT_URL) {
     try {
       await appsScriptCall('addParticipant', { pib, group: targetGroup, groupId: targetId, age: selectedAge, date: dateStr, phone });
-      invalidateParticipants();  // кеш застарів — новий учасник
-      if (String(selectedGroup) === String(targetId)) renderGroupList(true);
+      if (String(selectedGroup) === String(targetId)) renderGroupList();
     } catch(e) {
       errBox.textContent = 'Помилка збереження: ' + e.message;
       errBox.classList.add('show');
@@ -1079,7 +1067,7 @@ function showSuccessBanner(pib, groupData, groupName, phone, age) {
 }
 
 // ─── GROUPS PAGE ─────────────────────────────────────────────
-async function activateGroup(id, force = false) {
+async function activateGroup(id) {
   selectedGroup = id;
   localStorage.setItem('selectedGroupId2026', id);
 
@@ -1099,7 +1087,7 @@ async function activateGroup(id, force = false) {
     }
   });
 
-  await renderGroupList(force);
+  await renderGroupList();
 }
 
 // Вік учасника: беремо з таблиці, інакше — діапазон групи
@@ -1110,19 +1098,15 @@ function participantAgeLabel(p) {
   return g ? groupAgeText(g) : '';
 }
 
-async function renderGroupList(force = false) {
+async function renderGroupList() {
   const area = document.getElementById('group-list-area');
   if (!selectedGroup) {
     area.innerHTML = '<div class="empty-state"><span class="emoji">☝️</span>Оберіть групу вище</div>';
     return;
   }
 
-  // Спінер лише коли даних ще нема (перше завантаження), інакше — без миготіння
-  if (!participantsReady || force) {
-    area.innerHTML = '<div class="loader"><div class="spinner"></div><br>Завантаження...</div>';
-  }
-
-  await loadParticipants(force);
+  area.innerHTML = '<div class="loader"><div class="spinner"></div><br>Завантаження...</div>';
+  await loadParticipants();
   const list      = participants.filter(p => String(groupOfParticipant(p)?.id) === String(selectedGroup));
   const groupData = groupById(selectedGroup);
 
@@ -1141,7 +1125,7 @@ async function renderGroupList(force = false) {
           </div>
           <div style="font-size:13px;color:var(--text2);">👩‍🏫 Наставники: <b style="color:var(--text)">${escHtml(groupData?.Наставники || '—')}</b></div>
         </div>
-        <button class="refresh-btn" onclick="activateGroup(selectedGroup, true)">🔄</button>
+        <button class="refresh-btn" onclick="activateGroup(selectedGroup)">🔄</button>
       </div>
     </div>
     <div class="count-badge" style="border:2px solid ${hex}44;background:${hex}12;color:${hex}">👦 ${list.length} учасників</div>
@@ -1177,13 +1161,10 @@ async function renderGroupList(force = false) {
 }
 
 // ─── ORGANIZER ───────────────────────────────────────────────
-async function renderOrganizer(force = false) {
+async function renderOrganizer() {
   const area = document.getElementById('organizer-content');
-  if (!participantsReady || force) {
-    area.innerHTML = '<div class="loader"><div class="spinner"></div><br>Завантаження...</div>';
-  }
-
-  await loadParticipants(force);
+  area.innerHTML = '<div class="loader"><div class="spinner"></div><br>Завантаження...</div>';
+  await loadParticipants();
 
   const total = participants.length;
 
@@ -1231,15 +1212,6 @@ async function renderOrganizer(force = false) {
   });
 
   area.innerHTML = `
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-title">🔀 Перерозподіл груп</div>
-      <p style="color:var(--text2);font-size:13px;margin-bottom:12px;line-height:1.5">
-        Рівномірно розподілить усіх дітей по 5 групах за віком. Вікові межі груп
-        (напр. «5–7», «13») оновляться автоматично під фактичний вік дітей.
-      </p>
-      <button class="btn btn-primary btn-sm" onclick="reorganizeGroups()">🔀 Перерозподілити рівномірно</button>
-    </div>
-
     <div class="stat-grid">
       <div class="stat-card big">
         <div class="stat-num">${total}</div>
@@ -1258,7 +1230,7 @@ async function renderOrganizer(force = false) {
     <div class="chart-wrap">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <h3 style="margin:0">📊 Розподіл по групах</h3>
-        <button class="refresh-btn" onclick="renderOrganizer(true)">🔄</button>
+        <button class="refresh-btn" onclick="renderOrganizer()">🔄</button>
       </div>
       ${bars}
     </div>
@@ -1279,23 +1251,6 @@ async function renderOrganizer(force = false) {
       ${groupCards}
     </div>
   `;
-}
-
-// ─── ПЕРЕРОЗПОДІЛ (рівномірно за віком) ──────────────────────
-async function reorganizeGroups() {
-  if (!confirm('Перерозподілити всіх дітей рівномірно по 5 групах?\nПоточні призначення груп і вікові межі зміняться.')) return;
-  showToast('⏳ Перерозподіл...');
-  try {
-    await appsScriptCall('reorganize');   // алгоритм виконується на бекенді
-    invalidateParticipants();             // призначення груп змінились
-    await loadGroups();                    // підтягуємо нові вікові межі
-    buildAgeChips();
-    buildGroupChips();
-    showToast('✅ Групи перерозподілено');
-    renderOrganizer(true);
-  } catch (e) {
-    showToast('❌ Помилка: ' + e.message);
-  }
 }
 
 function searchParticipant(query) {
